@@ -1,4 +1,19 @@
+# IMPORTANT USER ACTION REQUIRED:
+# The 'cookie' value in the 'headers' variable below needs to be regularly updated.
+# To get a fresh cookie:
+# 1. Open your web browser (e.g., Chrome).
+# 2. Log in to your SimilarWeb Pro account (pro.similarweb.com).
+# 3. Open the browser's developer tools (usually by pressing F12).
+# 4. Go to the "Network" tab in the developer tools.
+# 5. Perform an action on the SimilarWeb site that makes an API request (e.g., analyze a website).
+# 6. Look for a request to 'pro.similarweb.com' in the network log.
+# 7. Click on the request, and in the "Headers" tab (or "Request Headers"), find the 'Cookie' header.
+# 8. Copy the entire string value of the 'Cookie' header.
+# 9. Paste this new value to replace the existing cookie string in the 'headers' variable in this script.
+# This cookie can expire or be invalidated, leading to errors if not updated.
+
 import json
+import time  # Import the time module
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -9,8 +24,8 @@ from urllib3.util.retry import Retry
 
 file_input = r'C:\Users\manik\Desktop\facebook-ads\output\merge-csv.com__68632aab0e55b.csv'
 
-time = datetime.now().strftime('%Y%m%d_%H%M%S')
-file_out = f'results/results_{time}.csv'
+current_time_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+file_out = f'results/results_{current_time_str}.csv'
 
 ads_df = pd.read_csv(file_input)
 headers = {
@@ -50,10 +65,22 @@ def create_session():
 
 def check_for_shopify(url):
     try:
+        # Use a new session or the global one, ensuring timeout is set.
+        # Using a new session for simplicity here, but for many calls, reusing the global session is better.
         res = requests.get(url, timeout=30)
+        res.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
         return 'cdn.shopify.com' in res.text
-    except requests.RequestException as e:
-        print(f"Request failed for {url}: {e}")
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP error checking Shopify for {url}: {e}")
+        return False
+    except requests.exceptions.Timeout as e:
+        print(f"Timeout checking Shopify for {url}: {e}")
+        return False
+    except requests.exceptions.RequestException as e:
+        print(f"Request exception checking Shopify for {url}: {e}")
+        return False
+    except Exception as e:  # Catch any other unexpected errors
+        print(f"An unexpected error occurred while checking Shopify for {url}: {e}")
         return False
 
 
@@ -68,22 +95,56 @@ traffic_data = {}
 session = create_session()
 ads_df['shopify'] = False
 
+# Batch processing settings
+processed_count = 0
+batch_size = 50
+batch_delay_seconds = 30
+
 for shop_url in unique_shop_urls:
     try:
         traffic_data[shop_url] = None
+
+        # Individual request delay
+        time.sleep(1)  # Sleep for 1 second (can be adjusted or removed)
+
         api_url = f"https://pro.similarweb.com/widgetApi/WebsiteOverview/EngagementVisits/Graph?country=999&from=2023%7C12%7C11&to=2024%7C01%7C07&timeGranularity=Weekly&ShouldGetVerifiedData=false&includeSubDomains=true&isWindow=true&keys={shop_url}%2Cxnxx.com%2Cxhamster.com%2Cyouporn.com%2Cxvideos.com&webSource=Total&latest=28d"
-        print(f"Fetching traffic data for domain: {shop_url}")
+        print(f"Fetching traffic data for domain: {shop_url} (Count: {processed_count + 1})")
         response = session.get(api_url, headers=headers)
         if response.status_code == 200:
-            data = json.loads(response.text)
-            first_key = next(iter(data['Data']))
-            last_value = data['Data'][first_key]['Total'][0][-1]['Value']
-            print(last_value)
-            if isinstance(last_value, float):
-                last_value = int(last_value)
-            traffic_data[shop_url] = last_value
-    except:
-            pass
+            try:
+                data = json.loads(response.text)
+                first_key = next(iter(data['Data']))
+                last_value = data['Data'][first_key]['Total'][0][-1]['Value']
+                print(f"Successfully fetched traffic for {shop_url}: {last_value}")
+                if isinstance(last_value, float):
+                    last_value = int(last_value)
+                traffic_data[shop_url] = last_value
+            except json.JSONDecodeError as e:
+                print(f"Error decoding JSON for {shop_url}: {e}")
+                print(f"Response text: {response.text[:500]}...")  # Log first 500 chars
+                traffic_data[shop_url] = None  # Or an error indicator
+            except KeyError as e:
+                print(f"KeyError accessing data for {shop_url}: {e}")
+                print(f"Response data structure: {data}")
+                traffic_data[shop_url] = None  # Or an error indicator
+            except Exception as e:  # Catch any other unexpected errors during data processing
+                print(f"Unexpected error processing data for {shop_url}: {e}")
+                traffic_data[shop_url] = None
+        else:
+            print(
+                f"API request failed for {shop_url} with status code {response.status_code}: {response.text[:500]}...")
+            traffic_data[shop_url] = None  # Or an error indicator
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed for {shop_url}: {e}")
+        traffic_data[shop_url] = None  # Or an error indicator
+    except Exception as e:  # Catch any other unexpected errors during the request phase
+        print(f"An unexpected error occurred while fetching data for {shop_url}: {e}")
+        traffic_data[shop_url] = None
+    finally:
+        processed_count += 1
+        if processed_count % batch_size == 0:
+            print(f"Processed {processed_count} URLs. Pausing for {batch_delay_seconds} seconds...")
+            time.sleep(batch_delay_seconds)
 
 ads_df['traffic'] = ads_df['shop_url'].map(traffic_data)
 with ThreadPoolExecutor(max_workers=50) as executor:
@@ -106,6 +167,7 @@ def clean_illegal_chars(dataframe):
             for char in illegal_chars:
                 dataframe[col] = dataframe[col].str.replace(char, '', regex=False)
     return dataframe
+
 
 ads_df = clean_illegal_chars(ads_df)
 ads_df.sort_values(by=['shopify', 'traffic'], inplace=True, ascending=False)
